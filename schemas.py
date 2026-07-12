@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from datetime import datetime
+
+from pydantic import BaseModel, Field
 class UserCreate(BaseModel):
     name: str
     email: str
@@ -32,4 +34,32 @@ class DocumentChunkingOut(BaseModel):
     page_count: int
     total_chunks: int
     chunks: list[ChunkOut]
+
+
+class DocumentOut(BaseModel):
+    id: int
+    filename: str
+    page_count: int
+    chunk_count: int
+    uploaded_at: datetime
+
+
+class SearchRequest(BaseModel):
+    question: str
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class SearchResultOut(BaseModel):
+    chunk_id: int
+    document_id: int
+    filename: str
+    page_number: int
+    chunk_index: int
+    content: str
+    similarity_score: float
+
+
+class SearchResponse(BaseModel):
+    question: str
+    results: list[SearchResultOut]
 

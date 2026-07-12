@@ -1,8 +1,12 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from chunking import chunk_pages
+from embeddings import embed_texts
+from get_db import get_db
+from models import Document, DocumentChunk
 from pdf_extraction import PDFExtractionError, extract_text_from_pdf
-from schemas import ChunkOut, DocumentChunkingOut, DocumentExtractionOut, PageTextOut
+from schemas import ChunkOut, DocumentChunkingOut, DocumentExtractionOut, DocumentOut, PageTextOut
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -95,4 +99,42 @@ async def preview_document_chunks(file: UploadFile = File(...)):
             )
             for c in chunks
         ],
+    )
+
+
+@router.post("/", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
+async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    file_bytes = await _read_and_validate_pdf_upload(file)
+
+    try:
+        extracted = extract_text_from_pdf(file_bytes, file.filename)
+    except PDFExtractionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    chunks = chunk_pages(extracted.pages)
+    vectors = embed_texts([c.text for c in chunks])
+
+    document = Document(filename=extracted.filename, page_count=extracted.page_count)
+    document.chunks = [
+        DocumentChunk(
+            chunk_index=c.chunk_index,
+            page_number=c.page_number,
+            content=c.text,
+            embedding=vector,
+        )
+        for c, vector in zip(chunks, vectors)
+    ]
+
+    db.add(document)
+    await db.commit()
+
+    return DocumentOut(
+        id=document.id,
+        filename=document.filename,
+        page_count=document.page_count,
+        chunk_count=len(chunks),
+        uploaded_at=document.uploaded_at,
     )
