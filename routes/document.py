@@ -1,15 +1,17 @@
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
+from chunking import chunk_pages
 from pdf_extraction import PDFExtractionError, extract_text_from_pdf
-from schemas import DocumentExtractionOut, PageTextOut
+from schemas import ChunkOut, DocumentChunkingOut, DocumentExtractionOut, PageTextOut
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB, generous MVP ceiling
 
 
-@router.post("/extract", response_model=DocumentExtractionOut)
-async def extract_document_text(file: UploadFile = File(...)):
+async def _read_and_validate_pdf_upload(file: UploadFile) -> bytes:
+    """Shared upload validation for /extract and /chunk-preview: content-type/
+    extension check, empty-file check, size ceiling check."""
     if file.content_type != "application/pdf":
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -36,6 +38,13 @@ async def extract_document_text(file: UploadFile = File(...)):
             detail=f"File exceeds maximum size of {MAX_FILE_SIZE_BYTES} bytes.",
         )
 
+    return file_bytes
+
+
+@router.post("/extract", response_model=DocumentExtractionOut)
+async def extract_document_text(file: UploadFile = File(...)):
+    file_bytes = await _read_and_validate_pdf_upload(file)
+
     try:
         extracted = extract_text_from_pdf(file_bytes, file.filename)
     except PDFExtractionError as exc:
@@ -54,5 +63,36 @@ async def extract_document_text(file: UploadFile = File(...)):
                 char_count=p.char_count,
             )
             for p in extracted.pages
+        ],
+    )
+
+
+@router.post("/chunk-preview", response_model=DocumentChunkingOut)
+async def preview_document_chunks(file: UploadFile = File(...)):
+    file_bytes = await _read_and_validate_pdf_upload(file)
+
+    try:
+        extracted = extract_text_from_pdf(file_bytes, file.filename)
+    except PDFExtractionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    chunks = chunk_pages(extracted.pages)
+
+    return DocumentChunkingOut(
+        filename=extracted.filename,
+        page_count=extracted.page_count,
+        total_chunks=len(chunks),
+        chunks=[
+            ChunkOut(
+                chunk_index=c.chunk_index,
+                page_number=c.page_number,
+                text=c.text,
+                token_count=c.token_count,
+                char_count=c.char_count,
+            )
+            for c in chunks
         ],
     )

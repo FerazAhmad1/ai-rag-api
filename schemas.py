@@ -18,3 +18,18 @@ class DocumentExtractionOut(BaseModel):
     page_count: int
     pages: list[PageTextOut]
 
+
+class ChunkOut(BaseModel):
+    chunk_index: int
+    page_number: int
+    text: str
+    token_count: int
+    char_count: int
+
+
+class DocumentChunkingOut(BaseModel):
+    filename: str
+    page_count: int
+    total_chunks: int
+    chunks: list[ChunkOut]
+
