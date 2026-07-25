@@ -1,8 +1,18 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from routes.user import router as user_router
 from routes.document import router as document_router
 from routes.search import router as search_router
 app = FastAPI()
+
+# Wide open for local dev - tighten to specific origins before production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def first_api():

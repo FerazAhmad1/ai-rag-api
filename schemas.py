@@ -6,7 +6,17 @@ class UserCreate(BaseModel):
     email: str
     phone_number: str
     country_code: int
-    password: str
+    # max_length=72 approximates bcrypt's 72-byte limit (exact for ASCII;
+    # multi-byte UTF-8 passwords could still exceed 72 bytes under 72 chars).
+    password: str = Field(min_length=8, max_length=72)
+
+
+class UserOut(BaseModel):
+    id: int
+    name: str
+    email: str
+    phone_number: str
+    country_code: int
 
 
 class PageTextOut(BaseModel):
