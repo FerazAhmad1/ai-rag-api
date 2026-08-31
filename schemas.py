@@ -1,6 +1,6 @@
 from datetime import datetime
-
-from pydantic import BaseModel, Field
+from typing import Optional,Literal
+from pydantic import BaseModel, Field,model_validator
 class UserCreate(BaseModel):
     name: str
     email: str
@@ -9,6 +9,13 @@ class UserCreate(BaseModel):
     # max_length=72 approximates bcrypt's 72-byte limit (exact for ASCII;
     # multi-byte UTF-8 passwords could still exceed 72 bytes under 72 chars).
     password: str = Field(min_length=8, max_length=72)
+    confirm_password: str = Field(min_length=8, max_length=72)
+
+    @model_validator(mode="after")
+    def validate_passwords_match(self):
+        if self.password != self.confirm_password:
+            raise ValueError("passwords do not match")
+        return self
 
 
 class UserOut(BaseModel):
@@ -72,4 +79,36 @@ class SearchResultOut(BaseModel):
 class SearchResponse(BaseModel):
     question: str
     results: list[SearchResultOut]
+
+class LoginData(BaseModel):
+    email:Optional[str]
+    phone_number:Optional[str]
+    password:str
+
+    @model_validator(mode="after")
+    def validate_login(self):
+        if not self.email and not self.phone_number:
+            raise ValueError ("Either email or phone must be provided")
+        return self
+
+
+class VerificationData(BaseModel):
+    type:Literal["email","phone"]
+    value:str
+    countryCode:Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_country_code(self):
+        if self.type == "phone" and not self.countryCode:
+            raise ValueError("countryCode is required when type is phone")
+        return self
+
+class verifyOtpData(VerificationData):
+    otp:str = Field(min_length=6,max_length=6)
+
+
+
+
+
+
 

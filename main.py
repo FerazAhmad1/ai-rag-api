@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from routes.auth import router as auth_router
 from routes.user import router as user_router
 from routes.document import router as document_router
 from routes.search import router as search_router
@@ -18,6 +19,7 @@ app.add_middleware(
 async def first_api():
     return {"message":"first api created"}
 
+app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(document_router)
 app.include_router(search_router)
