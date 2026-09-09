@@ -1,8 +1,6 @@
 import asyncio
-import os
 from logging.config import fileConfig
 
-from dotenv import load_dotenv
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -10,14 +8,22 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 import models  # noqa: F401 - registers Document/DocumentChunk/Users on Base.metadata
-from database import Base
+from database import Base, DATABASE_URL
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-load_dotenv()
-config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL"))
+# Use the SAME DATABASE_URL the app itself computes (database.py, which
+# picks LOCAL_DB_*/PROD_DB_* based on ENVIRONMENT) - not a separately
+# re-derived value, so Alembic can never silently target a different
+# database than the app actually connects to.
+#
+# configparser (which set_main_option writes through) treats "%" as its own
+# interpolation syntax, so a URL-encoded password (quote_plus in database.py
+# turns e.g. "@" into "%40") must have every literal "%" escaped as "%%"
+# before being stored, or set_main_option raises ValueError.
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
