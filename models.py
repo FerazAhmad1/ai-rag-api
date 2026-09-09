@@ -16,10 +16,12 @@ class Users(Base):
     password = Column(String)
 
 
-# Must match the output dimension of the sentence-transformers model used for
-# embedding generation (all-MiniLM-L6-v2 -> 384). Change this and re-migrate
-# if the embedding model ever changes.
-EMBEDDING_DIM = 384
+# Must match embeddings.EMBEDDING_DIMENSIONS (Jina jina-embeddings-v5-text-
+# small, requested at 512 dims via the API's `dimensions` param - one of a
+# fixed discrete set Jina supports: 32/64/128/256/512/1024, not an arbitrary
+# value). Change both and re-migrate if the embedding model/dimension ever
+# changes.
+EMBEDDING_DIM = 512
 
 
 class Document(Base):

@@ -1,9 +1,11 @@
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from chunking import chunk_pages
-from embeddings import embed_texts
+from embeddings import embed_texts, TASK_RETRIEVAL_PASSAGE
 from get_db import get_db
+from get_jina_client import get_jina_client
 from models import Document, DocumentChunk
 from pdf_extraction import PDFExtractionError, extract_text_from_pdf
 from schemas import ChunkOut, DocumentChunkingOut, DocumentExtractionOut, DocumentOut, PageTextOut
@@ -103,7 +105,11 @@ async def preview_document_chunks(file: UploadFile = File(...)):
 
 
 @router.post("/", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
-async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_document(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    jina_client: httpx.AsyncClient = Depends(get_jina_client),
+):
     file_bytes = await _read_and_validate_pdf_upload(file)
 
     try:
@@ -115,7 +121,9 @@ async def upload_document(file: UploadFile = File(...), db: AsyncSession = Depen
         ) from exc
 
     chunks = chunk_pages(extracted.pages)
-    vectors = embed_texts([c.text for c in chunks])
+    vectors = await embed_texts(
+        [c.text for c in chunks], task=TASK_RETRIEVAL_PASSAGE, client=jina_client
+    )
 
     document = Document(filename=extracted.filename, page_count=extracted.page_count)
     document.chunks = [

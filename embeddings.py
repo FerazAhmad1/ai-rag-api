@@ -1,34 +1,73 @@
 """
 Pure, FastAPI/DB-agnostic module (no imports from models.py, database.py,
-routes/, or schemas.py) - mirrors the lazy-loading pattern in chunking.py.
+routes/, or schemas.py, and no app.state access) - mirrors the design of
+pdf_extraction.py/chunking.py. The caller (main.py's lifespan) owns the
+httpx.AsyncClient's lifecycle; this module just uses one it's given.
 
-Generates embeddings with the same model chunking.py sizes chunks against,
-so document and query embeddings always come from one consistent model.
+Generates embeddings via Jina AI's hosted embeddings API.
 """
 
-from functools import lru_cache
+import httpx
 
-from sentence_transformers import SentenceTransformer
+from config import JINA_API_KEY
 
-from chunking import EMBEDDING_MODEL_NAME
+JINA_API_URL = "https://api.jina.ai/v1/embeddings"
+EMBEDDING_MODEL_NAME = "jina-embeddings-v5-text-small"
+
+# Jina's v5 models only support a fixed discrete set of Matryoshka dims:
+# 32, 64, 128, 256, 512, 1024 (native output is 1024-dim) - NOT an arbitrary
+# range. 512 chosen per Jina's own guidance: "Matryoshka truncation to
+# 256-512 dimensions is suitable for storage-constrained indexing...
+# preserving strong retrieval quality above 256 dimensions."
+EMBEDDING_DIMENSIONS = 512
+
+# Jina's v5 models use task-specific adapters for asymmetric retrieval -
+# Jina's own docs state this "measurably affects performance." Document
+# chunks (indexed) and search questions (queries) must use different values.
+TASK_RETRIEVAL_PASSAGE = "retrieval.passage"  # for document chunks, on upload
+TASK_RETRIEVAL_QUERY = "retrieval.query"      # for the user's search question
 
 
-@lru_cache(maxsize=1)
-def _get_model() -> SentenceTransformer:
-    """
-    Lazily load and cache the embedding model.
+def create_jina_client() -> httpx.AsyncClient:
+    """Factory for the shared client - called once by main.py's lifespan.
+    Not cached/singleton here; lifecycle ownership lives in main.py."""
+    if not JINA_API_KEY:
+        raise RuntimeError("JINA_API_KEY is not configured")
+    return httpx.AsyncClient(
+        headers={"Authorization": f"Bearer {JINA_API_KEY}"},
+        timeout=30.0,
+    )
 
-    First call in a process downloads the model weights (~90MB) from
-    Hugging Face Hub into ~/.cache/huggingface if not already cached.
-    Subsequent calls (in this or later processes, once cached) are instant.
-    """
-    return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch-encode texts into embedding vectors, in the same order given."""
+async def embed_texts(
+    texts: list[str],
+    task: str,
+    client: httpx.AsyncClient,
+) -> list[list[float]]:
+    """Batch-embed texts via Jina AI, in the same order given."""
     if not texts:
         return []
-    model = _get_model()
-    vectors = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-    return vectors.tolist()
+    response = await client.post(
+        JINA_API_URL,
+        json={
+            "model": EMBEDDING_MODEL_NAME,
+            "input": texts,
+            "task": task,
+            "dimensions": EMBEDDING_DIMENSIONS,
+            "embedding_type": "float",
+            "normalized": True,
+            "truncate": True,
+        },
+    )
+    response.raise_for_status()
+    data = response.json()["data"]
+    data.sort(key=lambda item: item["index"])
+
+    vectors = [item["embedding"] for item in data]
+    for vector in vectors:
+        if len(vector) != EMBEDDING_DIMENSIONS:
+            raise RuntimeError(
+                f"Expected {EMBEDDING_DIMENSIONS}-dimensional embedding from "
+                f"Jina, got {len(vector)}."
+            )
+    return vectors

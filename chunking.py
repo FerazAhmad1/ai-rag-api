@@ -2,16 +2,21 @@
 Pure, FastAPI/DB-agnostic module (no imports from models.py, database.py,
 routes/, or schemas.py) - mirrors the design of pdf_extraction.py.
 
-Splits per-page extracted text into token-bounded, overlapping chunks sized
-against the ACTUAL tokenizer of the embedding model that will be used later
-(sentence-transformers/all-MiniLM-L6-v2), not an arbitrary character count
-and not the base tokenizer's generic (and here, wrong) max length.
+Splits per-page extracted text into token-bounded, overlapping chunks. Token
+counts are measured with tiktoken (OpenAI's tokenizer) as an approximation -
+the embedding backend is Jina AI (embeddings.py), which uses its own,
+different tokenizer. This is fine here: token counts only drive a
+retrieval-granularity chunk-size choice (~200 tokens), not truncation
+avoidance - Jina's real context window (32K tokens) is so much larger than
+our budget that approximate counts can't meaningfully risk truncation.
+Loading Jina's actual tokenizer would require the ~104MB `transformers`
+package for no real benefit at this scale, so tiktoken stays.
 """
 
 from dataclasses import dataclass
 from functools import lru_cache
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+import tiktoken
 
 from pdf_extraction import PageText
 
@@ -19,28 +24,22 @@ from pdf_extraction import PageText
 # Embedding-model identity & tokenizer constants
 # --------------------------------------------------------------------------
 
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# tiktoken's cl100k_base encoding - an approximation for chunk sizing, not
+# Jina's exact tokenizer (see module docstring for why that's fine here).
+TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
-# This is the sentence-transformers wrapper's max_seq_length (defined in
-# that model repo's sentence_bert_config.json), which is what actually
-# governs truncation when this model is used via SentenceTransformer(...)
-# to embed text.
-#
-# It is NOT the same as AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
-# .model_max_length, which reports the underlying base tokenizer's generic
-# ceiling (512) and does NOT reflect where this specific model actually
-# truncates. Trusting that generic value here would silently build chunks
-# up to ~512 tokens that get chopped in half by the embedding step later,
-# defeating the entire point of token-aware chunking.
-#
-# Hardcoded deliberately. Do not derive this programmatically.
-MAX_SEQ_LENGTH = 256
+# Jina's actual context window for jina-embeddings-v5-text-small is 32000
+# tokens - vastly larger than the 200-token budget below. Kept here as a
+# documented ceiling, not something CHUNK_SIZE_TOKENS is pushed close to.
+# This constant is NOT referenced anywhere else in this file (verified) -
+# actual chunk sizing is driven entirely by CHUNK_SIZE_TOKENS/
+# CHUNK_OVERLAP_TOKENS below, which are unchanged from local-model tuning.
+MAX_SEQ_LENGTH = 32000
 
-# Content-token budget per chunk (measured with add_special_tokens=False).
-# 200 content tokens + 2 special tokens ([CLS]/[SEP], added automatically by
-# SentenceTransformer at embed time) = 202, comfortably under
-# MAX_SEQ_LENGTH (256), leaving ~21% safety margin since chunk boundaries
-# are chosen via character-based separators, not exact token boundaries.
+# Content-token budget per chunk. This is now a RETRIEVAL GRANULARITY choice,
+# not a truncation-avoidance one (the model's real limit is 8191, ~41x this
+# budget) - smaller, focused chunks retrieve more precisely than large ones.
+# Kept at the same value tuned/verified when the embedding backend was local.
 CHUNK_SIZE_TOKENS = 200
 
 # ~20% overlap: a common default for RAG chunking. Enough to preserve
@@ -52,25 +51,22 @@ assert CHUNK_OVERLAP_TOKENS < CHUNK_SIZE_TOKENS, "overlap must be smaller than c
 
 
 @lru_cache(maxsize=1)
-def _get_tokenizer() -> PreTrainedTokenizerBase:
+def _get_tokenizer() -> tiktoken.Encoding:
     """
-    Lazily load and cache the tokenizer for EMBEDDING_MODEL_NAME.
+    Lazily load and cache the tiktoken encoding.
 
-    First call in a process may trigger a small (few hundred KB) one-time
-    download from Hugging Face Hub into ~/.cache/huggingface if this model
-    isn't already cached locally. Subsequent calls (in this or later
-    processes, once cached on disk) are instant and offline.
+    First call in a process may trigger a small one-time download of the
+    BPE ranks file (cached locally afterward, typically under
+    ~/.cache/tiktoken or TIKTOKEN_CACHE_DIR if set). Subsequent calls are
+    instant and offline.
     """
-    return AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
+    return tiktoken.get_encoding(TIKTOKEN_ENCODING_NAME)
 
 
-def _count_tokens(text: str, tokenizer: PreTrainedTokenizerBase) -> int:
-    """Content-token count only (add_special_tokens=False) - matches how
-    CHUNK_SIZE_TOKENS is budgeted, i.e. NOT what the model sees after
-    [CLS]/[SEP] insertion at embedding time."""
+def _count_tokens(text: str, tokenizer: tiktoken.Encoding) -> int:
     if not text:
         return 0
-    return len(tokenizer(text, add_special_tokens=False)["input_ids"])
+    return len(tokenizer.encode(text))
 
 
 # --------------------------------------------------------------------------
@@ -82,7 +78,7 @@ class Chunk:
     chunk_index: int  # 0-based, sequential across the whole document
     page_number: int  # 1-indexed, matches PageText.page_number
     text: str
-    token_count: int  # content tokens only (add_special_tokens=False)
+    token_count: int  # tiktoken (cl100k_base) token count
     char_count: int
 
 
@@ -111,7 +107,7 @@ def _split_text_by_separator(text: str, separator: str) -> list[str]:
 
 def _hard_slice_by_tokens(
     text: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: tiktoken.Encoding,
     token_budget: int,
 ) -> list[str]:
     """
@@ -124,18 +120,18 @@ def _hard_slice_by_tokens(
     whitespace/detokenization artifacts on decode (acceptable - this path
     only triggers on pathological, non-prose input).
     """
-    input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    input_ids = tokenizer.encode(text)
     pieces = []
     for start in range(0, len(input_ids), token_budget):
         token_slice = input_ids[start : start + token_budget]
-        pieces.append(tokenizer.decode(token_slice, skip_special_tokens=True))
+        pieces.append(tokenizer.decode(token_slice))
     return pieces
 
 
 def _split_recursive(
     text: str,
     separators: list[str],
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: tiktoken.Encoding,
     token_budget: int,
 ) -> list[str]:
     """
@@ -169,7 +165,7 @@ def _split_recursive(
 
 def _carry_over_overlap(
     units: list[str],
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: tiktoken.Encoding,
     chunk_overlap_tokens: int,
 ) -> list[str]:
     """Take trailing units from `units` (a just-finished chunk's pieces)
@@ -189,7 +185,7 @@ def _carry_over_overlap(
 
 def _pack_atomic_units(
     atomic_units: list[str],
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: tiktoken.Encoding,
     chunk_size_tokens: int,
     chunk_overlap_tokens: int,
 ) -> list[str]:

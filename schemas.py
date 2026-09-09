@@ -80,6 +80,23 @@ class SearchResponse(BaseModel):
     question: str
     results: list[SearchResultOut]
 
+
+class AskResponse(BaseModel):
+    question: str
+    answer: str
+    sources: list[SearchResultOut]
+
+
+class GenerateRequest(BaseModel):
+    question: str
+    chunks: list[SearchResultOut]  # e.g. copy-pasted straight from a /search/ response
+
+
+class GenerateResponse(BaseModel):
+    question: str
+    answer: str
+    sources: list[SearchResultOut]
+
 class LoginData(BaseModel):
     email:Optional[str]
     phone_number:Optional[str]
